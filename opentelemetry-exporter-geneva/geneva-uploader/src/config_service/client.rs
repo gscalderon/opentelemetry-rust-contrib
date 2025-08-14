@@ -21,6 +21,7 @@ use url::Url;
 
 use azure_core::credentials::TokenCredential;
 use std::sync::Arc;
+use azure_identity::{ManagedIdentityCredential, ManagedIdentityCredentialOptions, UserAssignedId};
 
 /// Authentication methods for the Geneva Config Client.
 ///
@@ -92,6 +93,8 @@ pub(crate) enum GenevaConfigClientError {
     MonikerNotFound(String),
     #[error("Internal error: {0}")]
     InternalError(String),
+    #[error("Token acquisition failed: {0}")]
+    TokenAcquisition(String),
 }
 
 #[allow(dead_code)]
@@ -259,7 +262,29 @@ impl GenevaConfigClient {
             }
             AuthMethod::ManagedIdentity => {
                 // For MSI, no client TLS is needed; build default HTTP client.
-                // Credential and scope will be initialized after URL prep.
+                // Credential and scope are initialized based on env and endpoint.
+                // Determine which user-assigned identity (optional).
+                let msi_id = match (
+                    std::env::var("GENEVA_MSI_RESOURCE_ID").ok(),
+                    std::env::var("GENEVA_MSI_CLIENT_ID").ok(),
+                ) {
+                    (Some(resource_id), _) if !resource_id.is_empty() => {
+                        Some(UserAssignedId::ResourceId(resource_id))
+                    }
+                    (_, Some(client_id)) if !client_id.is_empty() => {
+                        Some(UserAssignedId::ClientId(client_id))
+                    }
+                    _ => None,
+                };
+
+                // Build options with optional user-assigned identity
+                let mut opts = ManagedIdentityCredentialOptions::default();
+                if let Some(id) = msi_id {
+                    opts.user_assigned_id = Some(id);
+                }
+                let cred = ManagedIdentityCredential::new(Some(opts))
+                    .map_err(|e| GenevaConfigClientError::InternalError(e.to_string()))?;
+                msi_credential = Some(cred as Arc<dyn TokenCredential>);
             }
             #[cfg(feature = "mock_auth")]
             AuthMethod::MockAuth => {
