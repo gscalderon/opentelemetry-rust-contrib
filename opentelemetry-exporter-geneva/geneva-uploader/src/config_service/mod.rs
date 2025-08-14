@@ -325,4 +325,62 @@ mod tests {
         println!("Auth token length: {token_len}");
         println!("Moniker name: {}", moniker.name);
     }
+
+    // To run this test with Managed Identity, set the following environment variables
+    // and execute with `cargo test -p geneva-uploader test_get_ingestion_info_real_server_msi -- --ignored`.
+    // Required:
+    //   export GENEVA_ENDPOINT="https://gcs.ppe.monitoring.core.windows.net"
+    //   export GENEVA_ENVIRONMENT="Test"
+    //   export GENEVA_ACCOUNT="PipelineAgent2Demo"
+    //   export GENEVA_NAMESPACE="PAdemo2"
+    //   export GENEVA_REGION="eastus"
+    //   export GENEVA_CONFIG_MAJOR_VERSION=2
+    // Identity selector (one of):
+    //   export GENEVA_MSI_CLIENT_ID="<user-assigned-client-id>"
+    //   or
+    //   export GENEVA_MSI_RESOURCE_ID="/subscriptions/.../resourceGroups/.../providers/Microsoft.ManagedIdentity/userAssignedIdentities/NAME"
+    // Audience override (optional; by default derived from GENEVA_ENDPOINT origin):
+    //   export GENEVA_AAD_SCOPE="https://gcs.ppe.monitoring.core.windows.net/.default"
+    //   or
+    //   export GENEVA_AAD_RESOURCE="https://gcs.ppe.monitoring.core.windows.net"
+    #[tokio::test]
+    #[ignore]
+    async fn test_get_ingestion_info_real_server_msi() {
+        let endpoint = env::var("GENEVA_ENDPOINT").expect("GENEVA_ENDPOINT must be set");
+        let environment = env::var("GENEVA_ENVIRONMENT").expect("GENEVA_ENVIRONMENT must be set");
+        let account = env::var("GENEVA_ACCOUNT").expect("GENEVA_ACCOUNT must be set");
+        let namespace = env::var("GENEVA_NAMESPACE").expect("GENEVA_NAMESPACE must be set");
+        let region = env::var("GENEVA_REGION").expect("GENEVA_REGION must be set");
+        let config_major_version: u32 = env::var("GENEVA_CONFIG_MAJOR_VERSION")
+            .expect("GENEVA_CONFIG_MAJOR_VERSION must be set")
+            .parse()
+            .expect("GENEVA_CONFIG_MAJOR_VERSION must be a u32");
+
+        // Ensure at least one identity selector is present
+        let has_client_id = env::var("GENEVA_MSI_CLIENT_ID").is_ok();
+        let has_resource_id = env::var("GENEVA_MSI_RESOURCE_ID").is_ok();
+        assert!(has_client_id || has_resource_id, "Set GENEVA_MSI_CLIENT_ID or GENEVA_MSI_RESOURCE_ID");
+
+        let config = GenevaConfigClientConfig {
+            endpoint,
+            environment,
+            account,
+            namespace,
+            region,
+            config_major_version,
+            auth_method: AuthMethod::ManagedIdentity,
+        };
+
+        let client = GenevaConfigClient::new(config).expect("Failed to create MSI client");
+        let (ingestion_info, moniker, token_endpoint) = client
+            .get_ingestion_info()
+            .await
+            .expect("Failed to get ingestion info with MSI");
+
+        assert!(!ingestion_info.endpoint.is_empty());
+        assert!(!ingestion_info.auth_token.is_empty());
+        assert!(!token_endpoint.is_empty());
+        assert!(!moniker.name.is_empty());
+        assert!(!moniker.account_group.is_empty());
+    }
 }
