@@ -2,7 +2,7 @@
 
 use base64::{engine::general_purpose, Engine as _};
 use reqwest::{
-    header::{HeaderMap, HeaderValue, ACCEPT, USER_AGENT},
+    header::{HeaderMap, HeaderValue, ACCEPT, USER_AGENT, AUTHORIZATION},
     Client,
 };
 use serde::Deserialize;
@@ -319,9 +319,20 @@ impl GenevaConfigClient {
 
     let http_client = client_builder.build()?;
 
-        // If MSI is configured, derive scope from endpoint if not provided by env.
+        // If MSI is configured, derive scope from endpoint unless overridden by env variables.
         if matches!(config.auth_method, AuthMethod::ManagedIdentity) {
-            let scope = derive_scope_from_endpoint(&config.endpoint);
+            // Allow explicit audience via env
+            let scope_env = std::env::var("GENEVA_AAD_SCOPE").ok();
+            let resource_env = std::env::var("GENEVA_AAD_RESOURCE").ok();
+            let scope = if let Some(s) = scope_env.filter(|s| !s.is_empty()) {
+                s
+            } else if let Some(r) = resource_env.filter(|r| !r.is_empty()) {
+                let trimmed = r.trim_end_matches('/')
+                    .to_string();
+                format!("{trimmed}/.default")
+            } else {
+                derive_scope_from_endpoint(&config.endpoint)
+            };
             msi_scope = Some(scope);
         }
 
@@ -469,10 +480,18 @@ impl GenevaConfigClient {
 
         let req_id = Uuid::new_v4().to_string();
 
-        let mut request = self
-            .http_client
-            .get(&url)
-            .headers(self.static_headers.clone()); // Clone only cheap references
+        let mut request = self.http_client.get(&url).headers(self.static_headers.clone());
+
+        // Attach MSI bearer token if configured
+        if let (Some(cred), Some(scope)) = (&self.msi_credential, &self.msi_scope) {
+            let scopes: [&str; 1] = [scope.as_str()];
+            let token = cred
+                .get_token(&scopes, None)
+                .await
+                .map_err(|e| GenevaConfigClientError::TokenAcquisition(e.to_string()))?;
+            let bearer = format!("Bearer {}", token.token.secret());
+            request = request.header(AUTHORIZATION, bearer);
+        }
 
         request = request.header("x-ms-client-request-id", req_id);
         let response = request
