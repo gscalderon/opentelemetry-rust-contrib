@@ -17,6 +17,10 @@ use std::fmt::Write;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::RwLock;
+use url::Url;
+
+use azure_core::credentials::TokenCredential;
+use std::sync::Arc;
 
 /// Authentication methods for the Geneva Config Client.
 ///
@@ -193,6 +197,9 @@ pub(crate) struct GenevaConfigClient {
     agent_identity: String,
     agent_version: String,
     static_headers: HeaderMap,
+    // MSI auth state (when AuthMethod::ManagedIdentity)
+    msi_credential: Option<Arc<dyn TokenCredential>>, // created when MSI is used
+    msi_scope: Option<String>,                         // derived or provided scope (".../.default")
 }
 
 impl fmt::Debug for GenevaConfigClient {
@@ -229,6 +236,10 @@ impl GenevaConfigClient {
             .http1_only()
             .timeout(Duration::from_secs(30)); //TODO - make this configurable
 
+    // Prepare MSI fields; populate if MSI is selected
+    let mut msi_credential: Option<Arc<dyn TokenCredential>> = None;
+    let mut msi_scope: Option<String> = None;
+
         match &config.auth_method {
             // TODO: Certificate auth would be removed in favor of managed identity.,
             // This is for testing, so we can use self-signed certs, and password in plain text.
@@ -247,9 +258,8 @@ impl GenevaConfigClient {
                 client_builder = client_builder.use_preconfigured_tls(tls_connector);
             }
             AuthMethod::ManagedIdentity => {
-                return Err(GenevaConfigClientError::AuthMethodNotImplemented(
-                    "Managed Identity authentication is not implemented yet".into(),
-                ));
+                // For MSI, no client TLS is needed; build default HTTP client.
+                // Credential and scope will be initialized after URL prep.
             }
             #[cfg(feature = "mock_auth")]
             AuthMethod::MockAuth => {
@@ -282,7 +292,13 @@ impl GenevaConfigClient {
             version_str
         ).map_err(|e| GenevaConfigClientError::InternalError(format!("Failed to write URL: {e}")))?;
 
-        let http_client = client_builder.build()?;
+    let http_client = client_builder.build()?;
+
+        // If MSI is configured, derive scope from endpoint if not provided by env.
+        if matches!(config.auth_method, AuthMethod::ManagedIdentity) {
+            let scope = derive_scope_from_endpoint(&config.endpoint);
+            msi_scope = Some(scope);
+        }
 
         Ok(Self {
             config,
@@ -292,6 +308,8 @@ impl GenevaConfigClient {
             agent_identity: agent_identity.to_string(), // TODO make this configurable
             agent_version: "1.0".to_string(),           // TODO make this configurable
             static_headers,
+            msi_credential,
+            msi_scope,
         })
     }
 
@@ -531,6 +549,23 @@ fn extract_endpoint_from_token(token: &str) -> Result<String> {
         .to_string();
 
     Ok(endpoint)
+}
+
+/// Derive an AAD scope (".../.default") from a service endpoint URL.
+/// For example, https://gcs.ppe.monitoring.core.windows.net ->
+/// https://gcs.ppe.monitoring.core.windows.net/.default
+fn derive_scope_from_endpoint(endpoint: &str) -> String {
+    // Try parsing; if parsing fails, fall back to provided string + "/.default"
+    if let Ok(url) = Url::parse(endpoint) {
+        if let Some(host) = url.host_str() {
+            let scheme = url.scheme();
+            let port = url.port().map(|p| format!(":{p}")).unwrap_or_default();
+            return format!("{scheme}://{host}{port}/.default");
+        }
+    }
+    // Fallback
+    let trimmed = endpoint.trim_end_matches('/');
+    format!("{trimmed}/.default")
 }
 
 #[cfg(feature = "self_signed_certs")]
